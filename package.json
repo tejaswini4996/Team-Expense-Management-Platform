@@ -1,0 +1,1 @@
+{ "name": "team-expense-management-platform", "version": "1.0.0", "description": "A platform for managing team expenses.", "main": "server.js", "scripts": { "start": "node server.js" }, "dependencies": { "express": "^4.17.1", "pg": "^8.5.0", "redis": "^3.1.2", "jsonwebtoken": "^8.5.1", "dotenv": "^10.0.0", "express-rate-limit": "^5.1.6" }, "devDependencies": {} }
