@@ -1,0 +1,104 @@
+name: Deploy to AWS
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_DB: team_expense_test
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_pass
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run linter
+        run: npm run lint --if-present
+
+      - name: Run tests
+        run: npm test --if-present
+        env:
+          DATABASE_URL: postgresql://test_user:test_pass@localhost:5432/team_expense_test
+          REDIS_URL: redis://localhost:6379
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Deploy with Terraform
+        working-directory: terraform
+        run: |
+          terraform init
+          terraform plan -out=tfplan
+          terraform apply tfplan
+        env:
+          TF_VAR_db_username: ${{ secrets.DB_USERNAME }}
+          TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+          TF_VAR_jwt_secret: ${{ secrets.JWT_SECRET }}
+          TF_VAR_stripe_secret_key: ${{ secrets.STRIPE_SECRET_KEY }}
+          TF_VAR_public_key: ${{ secrets.EC2_PUBLIC_KEY }}
+
+      - name: Build Docker image
+        run: docker build -t team-expense-api:latest .
+
+      - name: Push to ECR
+        run: |
+          aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ${{ secrets.ECR_REGISTRY }}
+          docker tag team-expense-api:latest ${{ secrets.ECR_REGISTRY }}/team-expense-api:latest
+          docker push ${{ secrets.ECR_REGISTRY }}/team-expense-api:latest
+
+      - name: Deploy to EC2
+        run: |
+          aws ec2-instance-connect send-ssh-public-key \
+            --instance-id ${{ secrets.EC2_INSTANCE_ID }} \
+            --os-user ec2-user \
+            --ssh-public-key-file ~/.ssh/id_rsa.pub \
+            --availability-zone us-east-1a
+          
+          ssh -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_PUBLIC_IP }} \
+            'cd Team-Expense-Management-Platform && git pull && npm install && pm2 restart team-expense-api'

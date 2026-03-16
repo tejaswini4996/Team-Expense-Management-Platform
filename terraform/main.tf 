@@ -1,0 +1,193 @@
+terraform {
+  required_version = ">= 1.0"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 4.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+}
+
+# RDS PostgreSQL Database
+resource "aws_db_instance" "postgres" {
+  identifier       = "team-expense-db"
+  engine           = "postgres"
+  engine_version   = "14.7"
+  instance_class   = "db.t3.micro"
+  allocated_storage = 20
+
+  db_name  = "team_expense"
+  username = var.db_username
+  password = var.db_password
+
+  skip_final_snapshot       = true
+  publicly_accessible       = false
+  vpc_security_group_ids    = [aws_security_group.rds_sg.id]
+  db_subnet_group_name      = aws_db_subnet_group.default.name
+
+  tags = {
+    Name = "team-expense-postgres"
+  }
+}
+
+# ElastiCache Redis
+resource "aws_elasticache_cluster" "redis" {
+  cluster_id           = "team-expense-redis"
+  engine               = "redis"
+  node_type            = "cache.t3.micro"
+  num_cache_nodes      = 1
+  parameter_group_name = "default.redis7"
+  engine_version       = "7.0"
+  port                 = 6379
+  security_group_ids   = [aws_security_group.redis_sg.id]
+
+  tags = {
+    Name = "team-expense-redis"
+  }
+}
+
+# EC2 Instance for Node.js App
+resource "aws_instance" "app" {
+  ami           = data.aws_ami.amazon_linux_2.id
+  instance_type = "t3.micro"
+  key_name      = aws_key_pair.deployer.key_name
+
+  vpc_security_group_ids = [aws_security_group.app_sg.id]
+
+  user_data = base64encode(templatefile("${path.module}/user_data.sh", {
+    db_host     = aws_db_instance.postgres.endpoint
+    redis_host  = aws_elasticache_cluster.redis.cache_nodes[0].address
+    jwt_secret  = var.jwt_secret
+    stripe_key  = var.stripe_secret_key
+  }))
+
+  tags = {
+    Name = "team-expense-app"
+  }
+}
+
+# Security Group for RDS
+resource "aws_security_group" "rds_sg" {
+  name = "team-expense-rds-sg"
+
+  ingress {
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.app_sg.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# Security Group for Redis
+resource "aws_security_group" "redis_sg" {
+  name = "team-expense-redis-sg"
+
+  ingress {
+    from_port       = 6379
+    to_port         = 6379
+    protocol        = "tcp"
+    security_groups = [aws_security_group.app_sg.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# Security Group for App
+resource "aws_security_group" "app_sg" {
+  name = "team-expense-app-sg"
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 5000
+    to_port     = 5000
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# Data source for AMI
+data "aws_ami" "amazon_linux_2" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
+  }
+}
+
+# Key Pair for EC2
+resource "aws_key_pair" "deployer" {
+  key_name   = "team-expense-deployer"
+  public_key = var.public_key
+}
+
+# DB Subnet Group
+resource "aws_db_subnet_group" "default" {
+  name       = "team-expense-db-subnet"
+  subnet_ids = data.aws_subnets.default.ids
+
+  tags = {
+    Name = "team-expense-db-subnet-group"
+  }
+}
+
+data "aws_subnets" "default" {
+  filter {
+    name   = "default-for-az"
+    values = ["true"]
+  }
+}
+
+# Outputs
+output "db_endpoint" {
+  value = aws_db_instance.postgres.endpoint
+}
+
+output "redis_endpoint" {
+  value = aws_elasticache_cluster.redis.cache_nodes[0].address
+}
+
+output "app_public_ip" {
+  value = aws_instance.app.public_ip
+}
+
+output "app_url" {
+  value = "http://${aws_instance.app.public_ip}:5000"
+}

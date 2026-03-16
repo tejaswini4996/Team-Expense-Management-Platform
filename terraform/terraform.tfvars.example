@@ -1,0 +1,6 @@
+aws_region          = "us-east-1"
+db_username         = "admin"
+db_password         = "your_secure_password_here"
+jwt_secret          = "your_jwt_secret_here"
+stripe_secret_key   = "sk_test_your_stripe_key"
+public_key          = "ssh-rsa AAAA..."
